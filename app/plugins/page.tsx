@@ -1,8 +1,7 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
 
 interface Plugin {
   id: number;
@@ -33,11 +32,7 @@ function TrendDashboard({ plugins, loading, search }: { plugins: Plugin[]; loadi
   const [adConfig, setAdConfig] = useState<AdConfig | null>(null);
   const [configLoading, setConfigLoading] = useState(true);
 
-  useEffect(() => {
-    fetchAdConfig();
-  }, []);
-
-  const fetchAdConfig = async () => {
+  const fetchAdConfig = useCallback(async () => {
     try {
       const res = await fetch('/api/ad-config');
       const data = await res.json();
@@ -49,7 +44,15 @@ function TrendDashboard({ plugins, loading, search }: { plugins: Plugin[]; loadi
     } finally {
       setConfigLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void fetchAdConfig();
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [fetchAdConfig]);
   // 计算各分类下载量（真实数据）
   const categoryStats = plugins.reduce((acc, plugin) => {
     const cat = plugin.category || '未分类';
@@ -240,11 +243,25 @@ export default function Home() {
   const [selectedCategory, setSelectedCategory] = useState('');
   const [sortBy, setSortBy] = useState('created_at');
   const [loading, setLoading] = useState(true);
+  const [pluginsLoaded, setPluginsLoaded] = useState(false);
+  const [configLoaded, setConfigLoaded] = useState(false);
   const [showSortMenu, setShowSortMenu] = useState(false);
   const sortMenuRef = useRef<HTMLDivElement>(null);
-  const [searchHistory, setSearchHistory] = useState<string[]>([]);
+  const [searchHistory, setSearchHistory] = useState<string[]>(() => {
+    if (typeof window === 'undefined') {
+      return [];
+    }
+
+    try {
+      const saved = window.localStorage.getItem('search-history');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
   const [showHistory, setShowHistory] = useState(false);
   const searchInputRef = useRef<HTMLDivElement>(null);
+  const initialLoading = !pluginsLoaded || !configLoaded;
 
   // 点击外部关闭排序下拉菜单
   useEffect(() => {
@@ -263,24 +280,14 @@ export default function Home() {
     };
   }, [showSortMenu]);
 
-  // 加载搜索历史
-  useEffect(() => {
-    const saved = localStorage.getItem('search-history');
-    if (saved) {
-      try {
-        setSearchHistory(JSON.parse(saved));
-      } catch {
-        setSearchHistory([]);
-      }
-    }
-  }, []);
-
   // 保存搜索历史
   const saveSearchHistory = (term: string) => {
     if (!term.trim()) return;
-    const newHistory = [term.trim(), ...searchHistory.filter(h => h !== term.trim())].slice(0, 10);
-    setSearchHistory(newHistory);
-    localStorage.setItem('search-history', JSON.stringify(newHistory));
+    setSearchHistory((prev) => {
+      const newHistory = [term.trim(), ...prev.filter(h => h !== term.trim())].slice(0, 10);
+      localStorage.setItem('search-history', JSON.stringify(newHistory));
+      return newHistory;
+    });
   };
 
   // 高亮关键词
@@ -300,39 +307,20 @@ export default function Home() {
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
-  const [showGroupModal, setShowGroupModal] = useState(false);
+  const [showGroupModal, setShowGroupModal] = useState(true);
   const [shareModal, setShareModal] = useState<{ show: boolean; plugin: Plugin | null }>({ show: false, plugin: null });
   const [toast, setToast] = useState<{ show: boolean; message: string; type: 'success' | 'error' }>({ show: false, message: '', type: 'success' });
   const [activeTab, setActiveTab] = useState<'trend' | 'list' | string>('trend');
   const [contentVisible, setContentVisible] = useState(true);
-  const router = useRouter();
 
   const sortOptions = [
     { value: 'download_count', label: '按热度' },
     { value: 'created_at', label: '按时间' },
   ];
 
-  // 切换标签带动画
-  // 切换标签时强制传入参数，避免 selectedCategory 不变时 useEffect 不触发
-  const switchTab = (tab: string, category: string = '') => {
-    setContentVisible(false);
-    setTimeout(() => {
-      setActiveTab(tab);
-      setSelectedCategory(category);
-      setSearch('');
-      setLoading(true);
-      setContentVisible(true);
-      fetchPlugins({ search: '', category });
-    }, 150);
-  };
+  const fetchPlugins = useCallback(async (overrides?: { search?: string; category?: string }) => {
+    setLoading(true);
 
-  useEffect(() => {
-    fetchPlugins();
-    fetchConfig();
-  }, []);
-
-  // overrides 参数允许 switchTab 强制传入新值，解决 selectedCategory 未变化时 useEffect 不触发的 BUG
-  const fetchPlugins = async (overrides?: { search?: string; category?: string }) => {
     try {
       const params = new URLSearchParams();
       const currentSearch = overrides?.search !== undefined ? overrides.search : search;
@@ -347,7 +335,6 @@ export default function Home() {
       if (data.success) {
         setPlugins(data.plugins);
         setCategories(data.categories);
-        // 搜索关键词非空时自动缓存到本地搜索历史
         if (currentSearch.trim()) {
           saveSearchHistory(currentSearch);
         }
@@ -356,10 +343,11 @@ export default function Home() {
       console.error('获取插件失败:', error);
     } finally {
       setLoading(false);
+      setPluginsLoaded(true);
     }
-  };
+  }, [search, selectedCategory, sortBy]);
 
-  const fetchConfig = async () => {
+  const fetchConfig = useCallback(async () => {
     try {
       const res = await fetch('/api/config');
       const data = await res.json();
@@ -368,25 +356,44 @@ export default function Home() {
       }
     } catch (error) {
       console.error('获取配置失败:', error);
+    } finally {
+      setConfigLoaded(true);
     }
+  }, []);
+
+  // 切换标签带动画
+  // 切换标签时强制传入参数，避免 selectedCategory 不变时 useEffect 不触发
+  const switchTab = (tab: string, category: string = '') => {
+    const shouldRefetchCurrentData = selectedCategory === category && search === '';
+
+    setContentVisible(false);
+    setTimeout(() => {
+      setActiveTab(tab);
+      setSelectedCategory(category);
+      setSearch('');
+      setContentVisible(true);
+
+      if (shouldRefetchCurrentData) {
+        fetchPlugins({ search: '', category });
+      }
+    }, 150);
   };
 
   useEffect(() => {
-    fetchPlugins();
-  }, [search, selectedCategory, sortBy]);
+    const timer = window.setTimeout(() => {
+      void fetchConfig();
+    }, 0);
 
-  const handleDownload = (plugin: Plugin) => {
-    const params = new URLSearchParams({
-      url: plugin.download_url,
-      name: plugin.name,
-      id: plugin.id.toString(),
-    });
-    window.location.href = `/redirect?${params}`;
-  };
+    return () => window.clearTimeout(timer);
+  }, [fetchConfig]);
 
-  const handleShare = (plugin: Plugin) => {
-    setShareModal({ show: true, plugin });
-  };
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void fetchPlugins();
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [fetchPlugins]);
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -630,6 +637,15 @@ export default function Home() {
           </div>
         ) : null}
       </main>
+
+      {initialLoading && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-white/95 backdrop-blur-sm">
+          <div className="relative flex items-center justify-center">
+            <div className="h-14 w-14 rounded-full border-4 border-gray-200 border-t-black animate-spin" />
+            <div className="absolute h-6 w-6 rounded-full bg-white" />
+          </div>
+        </div>
+      )}
 
       {/* QQ群弹窗 */}
       {showGroupModal && config && (
